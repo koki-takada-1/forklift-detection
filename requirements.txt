@@ -1,0 +1,21 @@
+# YOLOv8
+ultralytics>=8.0.0
+
+# Hugging Faceからモデルをダウンロード
+huggingface_hub>=0.16.0
+
+# 画像処理
+opencv-python>=4.8.0
+numpy>=1.24.0
+
+# 音声アラート
+pygame>=2.5.0
+
+# PyTorch（必要に応じて）
+torch>=2.0.0
+torchvision>=0.15.0
+
+# その他の依存関係
+Pillow>=10.0.0
+matplotlib>=3.7.0
+scipy>=1.10.0
