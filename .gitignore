@@ -195,3 +195,9 @@ cython_debug/
 
 .DS_Store
 forkliftvenv/
+assets/
+*.mp4
+
+# モデルファイル
+models/models--keremberke--yolov8s-forklift-detection/
+*.pt
