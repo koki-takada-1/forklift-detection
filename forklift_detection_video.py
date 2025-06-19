@@ -24,13 +24,16 @@ MIN_DETECTION_SIZE = 10000
 ASPECT_RATIO_MIN = 0.5
 ASPECT_RATIO_MAX = 3.0
 FONT_SCALE = 0.8
-FONT_THICKNESS = 2
+FONT_THICKNESS = 2  # フォントの太さ
+DETECTION_BOX_THICKNESS = 2  # 検出枠の線の太さ
+DETECTION_BOX_SCALE = 0.9  # 検出枠のスケール（1.0=100%, 0.9=90%に縮小）
 STATUS_BG_COLOR = (50, 50, 50)
 STATUS_TEXT_COLOR = (255, 255, 255)
 DETECTION_COLOR = (0, 255, 0)
 ALERT_COLOR = (0, 0, 255)
 WARNING_COLOR = (0, 165, 255)
 ALERT_DURATION = 1.0  # アラート音の長さ（秒）
+ALERT_COOLDOWN = 3.0  # アラート音のクールダウン時間（秒）
 
 
 class ForkliftDetectorVideoAudio:
@@ -79,7 +82,7 @@ class ForkliftDetectorVideoAudio:
         self.detection_history = []
         self.history_size = 5
         self.detection_timestamps = []  # 検出時刻を記録
-        self.last_detection_time = -ALERT_DURATION  # 最後の検出時刻
+        self.last_alert_time = -ALERT_COOLDOWN  # 最後のアラート時刻
 
     def _check_ffmpeg(self):
         """FFmpegが利用可能か確認"""
@@ -126,9 +129,20 @@ class ForkliftDetectorVideoAudio:
         ]
 
         # 音声アラートのインジケーター
-        if self.has_beep and current_time - self.last_detection_time < ALERT_DURATION:
+        if (
+            self.has_beep
+            and self.last_alert_time >= 0
+            and current_time - self.last_alert_time < ALERT_DURATION
+        ):
             texts.append("ALERT: Playing beep!")
             cv2.circle(frame, (status_width - 30, 30), 10, (0, 0, 255), -1)
+        elif (
+            self.has_beep
+            and self.last_alert_time >= 0
+            and current_time - self.last_alert_time < ALERT_COOLDOWN
+        ):
+            remaining = ALERT_COOLDOWN - (current_time - self.last_alert_time)
+            texts.append(f"Cooldown: {remaining:.1f}s")
 
         for i, text in enumerate(texts):
             cv2.putText(
@@ -141,9 +155,60 @@ class ForkliftDetectorVideoAudio:
                 FONT_THICKNESS - 1,
             )
 
+    def _scale_box(self, box, scale=DETECTION_BOX_SCALE):
+        """
+        バウンディングボックスを中心から縮小/拡大
+
+        Args:
+            box: 元のバウンディングボックス座標 [x1, y1, x2, y2]
+            scale: スケール係数（1.0=100%, 0.9=90%に縮小, 1.1=110%に拡大）
+
+        Returns:
+            スケール調整後のボックス座標
+        """
+        x1, y1, x2, y2 = box
+
+        # ボックスの中心点を計算
+        center_x = (x1 + x2) / 2
+        center_y = (y1 + y2) / 2
+
+        # ボックスの幅と高さ
+        width = x2 - x1
+        height = y2 - y1
+
+        # スケール調整後の幅と高さ
+        new_width = width * scale
+        new_height = height * scale
+
+        # 新しい座標を計算（中心点を基準に）
+        new_x1 = center_x - new_width / 2
+        new_y1 = center_y - new_height / 2
+        new_x2 = center_x + new_width / 2
+        new_y2 = center_y + new_height / 2
+
+        return [new_x1, new_y1, new_x2, new_y2]
+
     def _draw_detection(self, frame, box, conf, cls_name, is_valid=True):
-        """検出結果の描画"""
-        x1, y1, x2, y2 = map(int, box)
+        """
+        検出結果の描画
+
+        検出枠のサイズを調整する部分：
+        - DETECTION_BOX_SCALE: 枠の大きさ（0.9=90%に縮小, 1.1=110%に拡大）
+        - DETECTION_BOX_THICKNESS: 枠線の太さ（2→1などに変更可能）
+        - FONT_SCALE: 文字の大きさ（0.6→0.4などに変更可能）
+        - FONT_THICKNESS: 文字の太さ（1→1のまま、または変更可能）
+        """
+        # バウンディングボックスをスケール調整
+        scaled_box = self._scale_box(box, DETECTION_BOX_SCALE)
+        x1, y1, x2, y2 = map(int, scaled_box)
+
+        height, width = frame.shape[:2]
+
+        # フレーム境界内に収める
+        x1 = max(0, min(x1, width - 1))
+        y1 = max(0, min(y1, height - 1))
+        x2 = max(0, min(x2, width - 1))
+        y2 = max(0, min(y2, height - 1))
 
         if not is_valid:
             color = WARNING_COLOR
@@ -152,21 +217,33 @@ class ForkliftDetectorVideoAudio:
         else:
             color = ALERT_COLOR
 
-        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        # 検出枠の描画（DETECTION_BOX_THICKNESSで線の太さを制御）
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, DETECTION_BOX_THICKNESS)
 
+        # ラベルの作成
         label = f"{cls_name}: {conf:.2f}"
         if not is_valid:
             label += " (filtered)"
+
+        # ラベルサイズの計算（FONT_SCALEとFONT_THICKNESSで文字サイズを制御）
         label_size, _ = cv2.getTextSize(
             label, cv2.FONT_HERSHEY_SIMPLEX, FONT_SCALE, FONT_THICKNESS
         )
+
+        # ラベルが画面外に出ないように調整
+        label_y1 = max(label_size[1] + 10, y1)
+        label_x2 = min(x1 + label_size[0] + 10, width - 5)
+
+        # ラベルの背景（少し小さめのパディング）
         cv2.rectangle(
-            frame, (x1, y1 - label_size[1] - 10), (x1 + label_size[0], y1), color, -1
+            frame, (x1, label_y1 - label_size[1] - 8), (label_x2, label_y1), color, -1
         )
+
+        # ラベルテキストの描画
         cv2.putText(
             frame,
             label,
-            (x1, y1 - 5),
+            (x1 + 5, label_y1 - 4),
             cv2.FONT_HERSHEY_SIMPLEX,
             FONT_SCALE,
             (255, 255, 255),
@@ -174,7 +251,7 @@ class ForkliftDetectorVideoAudio:
         )
 
     def _is_valid_detection(self, box):
-        """検出が有効かどうかを判定"""
+        """検出が有効かどうかを判定（元のボックスサイズで判定）"""
         x1, y1, x2, y2 = box
         width = x2 - x1
         height = y2 - y1
@@ -247,10 +324,14 @@ class ForkliftDetectorVideoAudio:
         # 検出時刻の記録（音声追加用）
         if forklift_detected:
             self.detection_count += 1
-            # クールダウン期間をチェック
-            if current_time - self.last_detection_time >= ALERT_DURATION:
+            # クールダウン期間をチェック（ALERT_COOLDOWN秒間は音を鳴らさない）
+            if current_time - self.last_alert_time >= ALERT_COOLDOWN:
                 self.detection_timestamps.append(current_time)
-                self.last_detection_time = current_time
+                self.last_alert_time = current_time
+                print(f"  → アラート音を追加: {current_time:.2f}秒")
+            else:
+                remaining = ALERT_COOLDOWN - (current_time - self.last_alert_time)
+                print(f"  → クールダウン中（残り{remaining:.1f}秒）")
 
         return frame, forklift_detected, [d for d in detections if d["is_valid"]]
 
@@ -317,7 +398,6 @@ class ForkliftDetectorVideoAudio:
                 "copy",  # 映像はコピー
                 "-c:a",
                 "aac",  # 音声はAAC
-                "-shortest",  # 短い方に合わせる
                 output_path,
             ]
 
@@ -374,8 +454,17 @@ class ForkliftDetectorVideoAudio:
         print(f"- 長さ: {total_time:.1f}秒")
 
         # 動画書き込みの準備（一時ファイルへ）
+        # H.264コーデックを使用して互換性を向上
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         out = cv2.VideoWriter(temp_video, fourcc, fps, (width, height))
+
+        if not out.isOpened():
+            # 別のコーデックで再試行
+            fourcc = cv2.VideoWriter_fourcc(*"XVID")
+            out = cv2.VideoWriter(
+                temp_video.replace(".mp4", ".avi"), fourcc, fps, (width, height)
+            )
+            temp_video = temp_video.replace(".mp4", ".avi")
 
         if not out.isOpened():
             print(f"エラー: 一時ファイルを作成できません")
@@ -383,6 +472,13 @@ class ForkliftDetectorVideoAudio:
             return False
 
         print(f"\n処理を開始します...")
+
+        # 元の動画と同じFPSとサイズを確実に使用
+        actual_fps = cap.get(cv2.CAP_PROP_FPS)
+        actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        print(f"出力設定: {actual_width}x{actual_height} @ {actual_fps}fps")
 
         # 処理開始
         start_time = datetime.now()
